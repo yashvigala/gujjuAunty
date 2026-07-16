@@ -1,23 +1,90 @@
-import { useQuery } from 'convex/react'
+import { Authenticated, AuthLoading, Unauthenticated, useQuery } from 'convex/react'
+import { useAuthActions } from '@convex-dev/auth/react'
 import { api } from '@gujjuaunty/backend/convex/_generated/api'
+import { LoginForm } from './components/LoginForm'
 import './App.css'
 
-// Temporary admin placeholder — proves the dashboard is talking to Convex.
-// Real panels (items CRUD, orders) land in later features.
-function App() {
+// Auth alone is not enough for the dashboard — the account's email must also
+// be in ADMIN_EMAILS (checked server-side in users.me, never trusted from the
+// client).
+function AdminGate() {
+  const me = useQuery(api.users.me)
+  const { signOut } = useAuthActions()
+
+  if (me === undefined) {
+    return (
+      <div className="center">
+        <p className="muted">Loading…</p>
+      </div>
+    )
+  }
+
+  if (!me?.isAdmin) {
+    return (
+      <div className="center">
+        <div className="card">
+          <h2>Not authorized</h2>
+          <p className="muted">
+            {me?.email ?? 'This account'} is not an admin. Add it to the{' '}
+            <code>ADMIN_EMAILS</code> env var on the Convex deployment to grant
+            access.
+          </p>
+          <button className="btn btn-primary" onClick={() => void signOut()}>
+            Sign out
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return <AdminHome email={me.email} />
+}
+
+function AdminHome({ email }: { email: string | undefined }) {
   const items = useQuery(api.items.list)
+  const { signOut } = useAuthActions()
 
   return (
-    <section id="center">
-      <div>
-        <h1>GujjuAunty Admin</h1>
-        <p>
+    <>
+      <header className="topbar">
+        <strong>GujjuAunty Admin</strong>
+        <div className="topbar-right">
+          <span className="muted">{email}</span>
+          <button className="btn" onClick={() => void signOut()}>
+            Sign out
+          </button>
+        </div>
+      </header>
+      <main className="content">
+        <h1>Dashboard</h1>
+        <p className="muted">
           {items === undefined
-            ? 'Connecting to Convex…'
-            : `Connected — ${items.length} item${items.length === 1 ? '' : 's'} in the store`}
+            ? 'Loading…'
+            : `${items.length} item${items.length === 1 ? '' : 's'} in the store`}
         </p>
-      </div>
-    </section>
+        <p className="muted">Items & orders management arrive in the next features.</p>
+      </main>
+    </>
+  )
+}
+
+function App() {
+  return (
+    <>
+      <AuthLoading>
+        <div className="center">
+          <p className="muted">Loading…</p>
+        </div>
+      </AuthLoading>
+      <Unauthenticated>
+        <div className="center">
+          <LoginForm />
+        </div>
+      </Unauthenticated>
+      <Authenticated>
+        <AdminGate />
+      </Authenticated>
+    </>
   )
 }
 

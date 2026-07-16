@@ -9,11 +9,12 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@convex-dev/auth": "^0.0.94",
     "@gujjuaunty/backend": "workspace:^",
     "convex": "^1.42.2",
     "next": "16.2.10",
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

@@ -18,6 +18,11 @@
     }
   },
   "dependencies": {
+    "@auth/core": "^0.41.2",
+    "@convex-dev/auth": "^0.0.94",
     "convex": "^1.42.2"
+  },
+  "devDependencies": {
+    "jose": "^6.2.3"
   }
 }

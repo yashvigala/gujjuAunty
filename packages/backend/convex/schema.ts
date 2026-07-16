@@ -1,7 +1,30 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { authTables } from "@convex-dev/auth/server";
 
 export default defineSchema({
+  // Tables Convex Auth needs to function (authAccounts, authSessions, ...).
+  ...authTables,
+
+  // Whiteboard: "user info" → name / email / address / phone no.
+  // This REPLACES the default authTables.users definition, so it must keep
+  // every field Convex Auth manages (all optional, auth writes them) and the
+  // "email" index Convex Auth looks users up by.
+  users: defineTable({
+    // managed by Convex Auth
+    name: v.optional(v.string()),
+    image: v.optional(v.string()),
+    email: v.optional(v.string()),
+    emailVerificationTime: v.optional(v.number()),
+    phone: v.optional(v.string()),
+    phoneVerificationTime: v.optional(v.number()),
+    isAnonymous: v.optional(v.boolean()),
+    // GujjuAunty profile fields
+    address: v.optional(v.string()),
+  })
+    .index("email", ["email"])
+    .index("phone", ["phone"]),
+
   // Products sold on the store.
   // `price` is stored in paise (integer) — avoids float rounding bugs and is
   // exactly what Razorpay expects later.
