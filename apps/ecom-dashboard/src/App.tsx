@@ -2,6 +2,7 @@ import { Authenticated, AuthLoading, Unauthenticated, useQuery } from 'convex/re
 import { useAuthActions } from '@convex-dev/auth/react'
 import { api } from '@gujjuaunty/backend/convex/_generated/api'
 import { LoginForm } from './components/LoginForm'
+import { ItemsPanel } from './components/ItemsPanel'
 import './App.css'
 
 // Auth alone is not enough for the dashboard — the account's email must also
@@ -41,7 +42,6 @@ function AdminGate() {
 }
 
 function AdminHome({ email }: { email: string | undefined }) {
-  const items = useQuery(api.items.list)
   const { signOut } = useAuthActions()
 
   return (
@@ -56,13 +56,7 @@ function AdminHome({ email }: { email: string | undefined }) {
         </div>
       </header>
       <main className="content">
-        <h1>Dashboard</h1>
-        <p className="muted">
-          {items === undefined
-            ? 'Loading…'
-            : `${items.length} item${items.length === 1 ? '' : 's'} in the store`}
-        </p>
-        <p className="muted">Items & orders management arrive in the next features.</p>
+        <ItemsPanel />
       </main>
     </>
   )
