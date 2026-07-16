@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "consumer",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@gujjuaunty/consumer", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "ecom-dashboard",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@gujjuaunty/ecom-dashboard", "dev"],
+      "port": 5173
+    }
+  ]
+}
