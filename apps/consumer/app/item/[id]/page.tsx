@@ -5,6 +5,7 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { getItem } from "@/lib/convex-server";
 import { formatPaise } from "@/lib/money";
+import { AddToCartButton } from "@/components/AddToCartButton";
 
 type Params = Promise<{ id: string }>;
 
@@ -70,7 +71,8 @@ async function ItemDetail({ params }: { params: Params }) {
           )}
         </p>
 
-        {/* Add-to-cart lands with the cart feature. */}
+        <AddToCartButton itemId={item._id} stock={item.stock} />
+
         <Link
           href="/"
           className="text-sm text-zinc-500 underline-offset-4 hover:underline"

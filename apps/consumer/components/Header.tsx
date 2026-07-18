@@ -4,6 +4,27 @@ import Link from "next/link";
 import { Authenticated, Unauthenticated, useQuery } from "convex/react";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { api } from "@gujjuaunty/backend/convex/_generated/api";
+import { useCart } from "@/lib/cart";
+
+// Cart link with a count badge. `hydrated` guards the badge so the server and
+// first client render match (the count is only known after localStorage loads).
+function CartLink() {
+  const { totalCount, hydrated } = useCart();
+  return (
+    <Link
+      href="/cart"
+      aria-label={`Cart with ${totalCount} item${totalCount === 1 ? "" : "s"}`}
+      className="relative rounded-full border border-zinc-300 px-4 py-1 text-sm transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+    >
+      Cart
+      {hydrated && totalCount > 0 && (
+        <span className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full bg-zinc-900 px-1 text-xs text-white dark:bg-zinc-50 dark:text-zinc-900">
+          {totalCount}
+        </span>
+      )}
+    </Link>
+  );
+}
 
 function UserMenu() {
   const { signOut } = useAuthActions();
@@ -32,6 +53,7 @@ export function Header() {
         GujjuAunty
       </Link>
       <nav className="flex items-center gap-4">
+        <CartLink />
         <Unauthenticated>
           <Link
             href="/login"
