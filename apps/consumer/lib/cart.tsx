@@ -6,27 +6,32 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
+import { useQuery } from "convex/react";
+import { api } from "@gujjuaunty/backend/convex/_generated/api";
 import type { Id } from "@gujjuaunty/backend/convex/_generated/dataModel";
 
-// The cart is intentionally client-side only: it lives in the browser and
-// survives refreshes via localStorage. Nothing hits the backend until
-// checkout (feature 7). We store just the item id + quantity — never a copy of
-// the price — so prices/availability are always read fresh from Convex on the
-// cart page. A stored price could go stale and let someone pay yesterday's
-// amount.
+// The cart is client-side (localStorage) and survives refreshes. It is scoped
+// to WHO is signed in: each user gets their own cart, and signed-out visitors
+// share a "guest" cart. This is what stops one account's cart from showing up
+// after sign-out or under a different account. We store only item id +
+// quantity — never price — so amounts are always read fresh from Convex.
 export type CartLine = { itemId: Id<"items">; quantity: number };
 
-// Bump the version suffix if the stored shape ever changes, so old data is
-// ignored instead of misread.
-const STORAGE_KEY = "gujju-cart:v1";
+// Bump the version if the stored shape changes. The identity (user id or
+// "guest") is appended so carts never collide between accounts.
+const KEY_PREFIX = "gujju-cart:v1:";
+const GUEST = "guest";
+
+const keyFor = (identity: string) => KEY_PREFIX + identity;
 
 type CartApi = {
   lines: CartLine[];
   totalCount: number; // sum of all quantities (drives the header badge)
-  hydrated: boolean; // false during SSR + first paint, true once localStorage is read
+  hydrated: boolean; // false until auth resolves + the right cart is loaded
   addItem: (itemId: Id<"items">, quantity?: number) => void;
   setQuantity: (itemId: Id<"items">, quantity: number) => void;
   removeItem: (itemId: Id<"items">) => void;
@@ -62,25 +67,65 @@ function parseLines(raw: string): CartLine[] {
   return out;
 }
 
+function readLines(identity: string): CartLine[] {
+  if (typeof window === "undefined") return [];
+  const raw = localStorage.getItem(keyFor(identity));
+  return raw ? parseLines(raw) : [];
+}
+
+function writeLines(identity: string, lines: CartLine[]) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(keyFor(identity), JSON.stringify(lines));
+}
+
+// Combine two carts by summing quantities per item — used when a guest signs in
+// so the items they added beforehand aren't lost.
+function mergeLines(a: CartLine[], b: CartLine[]): CartLine[] {
+  const totals = new Map<string, number>();
+  for (const line of [...a, ...b]) {
+    totals.set(line.itemId, (totals.get(line.itemId) ?? 0) + line.quantity);
+  }
+  return Array.from(totals, ([itemId, quantity]) => ({
+    itemId: itemId as Id<"items">,
+    quantity,
+  }));
+}
+
 export function CartProvider({ children }: { children: ReactNode }) {
+  // undefined while auth is resolving, null when signed out, else the user.
+  const me = useQuery(api.users.me);
+  const identity: string | null =
+    me === undefined ? null : (me?._id ?? GUEST);
+
   const [lines, setLines] = useState<CartLine[]>([]);
-  const [hydrated, setHydrated] = useState(false);
+  const [activeIdentity, setActiveIdentity] = useState<string | null>(null);
+  const prevIdentity = useRef<string | null>(null);
 
-  // Load once after mount. Starting empty (matching the server render) and then
-  // filling in avoids a hydration mismatch.
+  // Whenever the signed-in identity changes (first load, login, logout, switch)
+  // load THAT identity's cart. On a guest→user login, merge the guest cart in.
   useEffect(() => {
-    const raw =
-      typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
-    if (raw) setLines(parseLines(raw));
-    setHydrated(true);
-  }, []);
+    if (identity === null) return; // auth still resolving — leave cart empty
+    const prev = prevIdentity.current;
 
-  // Persist on every change — but not before the initial load, or we'd clobber
-  // the saved cart with the empty starting state.
+    if (prev === GUEST && identity !== GUEST) {
+      const merged = mergeLines(readLines(identity), readLines(GUEST));
+      writeLines(identity, merged);
+      writeLines(GUEST, []); // guest cart has been absorbed
+      setLines(merged);
+    } else if (prev !== identity) {
+      setLines(readLines(identity));
+    }
+
+    prevIdentity.current = identity;
+    setActiveIdentity(identity);
+  }, [identity]);
+
+  // Persist changes — but only to the identity we've actually loaded, so a cart
+  // is never written into the wrong account's slot mid-transition.
   useEffect(() => {
-    if (!hydrated) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(lines));
-  }, [lines, hydrated]);
+    if (activeIdentity === null || activeIdentity !== identity) return;
+    writeLines(activeIdentity, lines);
+  }, [lines, activeIdentity, identity]);
 
   const addItem = useCallback((itemId: Id<"items">, quantity = 1) => {
     setLines((prev) => {
@@ -94,17 +139,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const setQuantity = useCallback(
-    (itemId: Id<"items">, quantity: number) => {
-      // Setting to zero (or below) is the same as removing the line.
-      setLines((prev) =>
-        quantity <= 0
-          ? prev.filter((l) => l.itemId !== itemId)
-          : prev.map((l) => (l.itemId === itemId ? { ...l, quantity } : l))
-      );
-    },
-    []
-  );
+  const setQuantity = useCallback((itemId: Id<"items">, quantity: number) => {
+    // Setting to zero (or below) is the same as removing the line.
+    setLines((prev) =>
+      quantity <= 0
+        ? prev.filter((l) => l.itemId !== itemId)
+        : prev.map((l) => (l.itemId === itemId ? { ...l, quantity } : l))
+    );
+  }, []);
 
   const removeItem = useCallback((itemId: Id<"items">) => {
     setLines((prev) => prev.filter((l) => l.itemId !== itemId));
@@ -116,6 +158,9 @@ export function CartProvider({ children }: { children: ReactNode }) {
     () => lines.reduce((sum, l) => sum + l.quantity, 0),
     [lines]
   );
+
+  // Hydrated once the loaded cart matches the current identity.
+  const hydrated = activeIdentity !== null && activeIdentity === identity;
 
   const value = useMemo<CartApi>(
     () => ({
