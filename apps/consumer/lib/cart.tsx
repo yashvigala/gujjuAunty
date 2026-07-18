@@ -10,28 +10,26 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "@gujjuaunty/backend/convex/_generated/api";
 import type { Id } from "@gujjuaunty/backend/convex/_generated/dataModel";
 
-// The cart is client-side (localStorage) and survives refreshes. It is scoped
-// to WHO is signed in: each user gets their own cart, and signed-out visitors
-// share a "guest" cart. This is what stops one account's cart from showing up
-// after sign-out or under a different account. We store only item id +
-// quantity — never price — so amounts are always read fresh from Convex.
+// Cart model:
+//  • Signed in  → the cart lives in Convex (see convex/cart.ts). Because Convex
+//    queries are live, it syncs across every device/browser for that account in
+//    real time.
+//  • Guest      → the cart lives in this browser's localStorage.
+//  • On login   → the guest cart is merged into the account cart, then cleared.
+// Both sources expose the same { itemId, quantity } shape, so the cart page and
+// badge don't care which one is active.
 export type CartLine = { itemId: Id<"items">; quantity: number };
 
-// Bump the version if the stored shape changes. The identity (user id or
-// "guest") is appended so carts never collide between accounts.
-const KEY_PREFIX = "gujju-cart:v1:";
-const GUEST = "guest";
-
-const keyFor = (identity: string) => KEY_PREFIX + identity;
+const GUEST_KEY = "gujju-cart:v1:guest";
 
 type CartApi = {
   lines: CartLine[];
-  totalCount: number; // sum of all quantities (drives the header badge)
-  hydrated: boolean; // false until auth resolves + the right cart is loaded
+  totalCount: number;
+  hydrated: boolean;
   addItem: (itemId: Id<"items">, quantity?: number) => void;
   setQuantity: (itemId: Id<"items">, quantity: number) => void;
   removeItem: (itemId: Id<"items">) => void;
@@ -40,8 +38,7 @@ type CartApi = {
 
 const CartContext = createContext<CartApi | null>(null);
 
-// localStorage holds arbitrary (possibly corrupted or tampered) text — validate
-// the shape before trusting it, and drop anything that doesn't fit.
+// localStorage holds arbitrary (possibly corrupted) text — validate before use.
 function parseLines(raw: string): CartLine[] {
   let data: unknown;
   try {
@@ -67,100 +64,128 @@ function parseLines(raw: string): CartLine[] {
   return out;
 }
 
-function readLines(identity: string): CartLine[] {
+function readGuest(): CartLine[] {
   if (typeof window === "undefined") return [];
-  const raw = localStorage.getItem(keyFor(identity));
+  const raw = localStorage.getItem(GUEST_KEY);
   return raw ? parseLines(raw) : [];
 }
 
-function writeLines(identity: string, lines: CartLine[]) {
+function writeGuest(lines: CartLine[]) {
   if (typeof window === "undefined") return;
-  localStorage.setItem(keyFor(identity), JSON.stringify(lines));
-}
-
-// Combine two carts by summing quantities per item — used when a guest signs in
-// so the items they added beforehand aren't lost.
-function mergeLines(a: CartLine[], b: CartLine[]): CartLine[] {
-  const totals = new Map<string, number>();
-  for (const line of [...a, ...b]) {
-    totals.set(line.itemId, (totals.get(line.itemId) ?? 0) + line.quantity);
-  }
-  return Array.from(totals, ([itemId, quantity]) => ({
-    itemId: itemId as Id<"items">,
-    quantity,
-  }));
+  localStorage.setItem(GUEST_KEY, JSON.stringify(lines));
 }
 
 export function CartProvider({ children }: { children: ReactNode }) {
-  // undefined while auth is resolving, null when signed out, else the user.
+  // undefined while auth resolves, null when signed out, else the user.
   const me = useQuery(api.users.me);
-  const identity: string | null =
-    me === undefined ? null : (me?._id ?? GUEST);
+  const authLoading = me === undefined;
+  const isSignedIn = me !== undefined && me !== null;
 
-  const [lines, setLines] = useState<CartLine[]>([]);
-  const [activeIdentity, setActiveIdentity] = useState<string | null>(null);
-  const prevIdentity = useRef<string | null>(null);
+  // Server cart (live). Returns [] when signed out; we just ignore it then.
+  const serverCart = useQuery(api.cart.get);
+  const addMut = useMutation(api.cart.addItem);
+  const setQtyMut = useMutation(api.cart.setQuantity);
+  const removeMut = useMutation(api.cart.removeItem);
+  const clearMut = useMutation(api.cart.clear);
+  const mergeMut = useMutation(api.cart.merge);
 
-  // Whenever the signed-in identity changes (first load, login, logout, switch)
-  // load THAT identity's cart. On a guest→user login, merge the guest cart in.
+  // Guest cart (localStorage) — only used while signed out.
+  const [guestLines, setGuestLines] = useState<CartLine[]>([]);
+  const [guestLoaded, setGuestLoaded] = useState(false);
+
   useEffect(() => {
-    if (identity === null) return; // auth still resolving — leave cart empty
-    const prev = prevIdentity.current;
+    setGuestLines(readGuest());
+    setGuestLoaded(true);
+  }, []);
 
-    if (prev === GUEST && identity !== GUEST) {
-      const merged = mergeLines(readLines(identity), readLines(GUEST));
-      writeLines(identity, merged);
-      writeLines(GUEST, []); // guest cart has been absorbed
-      setLines(merged);
-    } else if (prev !== identity) {
-      setLines(readLines(identity));
+  useEffect(() => {
+    if (!guestLoaded) return;
+    writeGuest(guestLines);
+  }, [guestLines, guestLoaded]);
+
+  // When a guest signs in, fold their local cart into the account cart once.
+  const prevSignedIn = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (authLoading) return;
+    if (prevSignedIn.current === false && isSignedIn) {
+      const local = readGuest();
+      if (local.length > 0) {
+        void mergeMut({ lines: local }).then(() => {
+          writeGuest([]);
+          setGuestLines([]);
+        });
+      }
     }
+    prevSignedIn.current = isSignedIn;
+  }, [authLoading, isSignedIn, mergeMut]);
 
-    prevIdentity.current = identity;
-    setActiveIdentity(identity);
-  }, [identity]);
+  const lines: CartLine[] = isSignedIn ? (serverCart ?? []) : guestLines;
 
-  // Persist changes — but only to the identity we've actually loaded, so a cart
-  // is never written into the wrong account's slot mid-transition.
-  useEffect(() => {
-    if (activeIdentity === null || activeIdentity !== identity) return;
-    writeLines(activeIdentity, lines);
-  }, [lines, activeIdentity, identity]);
+  // Hydrated once the active source has loaded (avoids a flash of empty cart).
+  const hydrated = authLoading
+    ? false
+    : isSignedIn
+      ? serverCart !== undefined
+      : guestLoaded;
 
-  const addItem = useCallback((itemId: Id<"items">, quantity = 1) => {
-    setLines((prev) => {
-      const existing = prev.find((l) => l.itemId === itemId);
-      if (existing) {
-        return prev.map((l) =>
-          l.itemId === itemId ? { ...l, quantity: l.quantity + quantity } : l
+  const addItem = useCallback(
+    (itemId: Id<"items">, quantity = 1) => {
+      if (isSignedIn) {
+        void addMut({ itemId, quantity });
+      } else {
+        setGuestLines((prev) => {
+          const existing = prev.find((l) => l.itemId === itemId);
+          return existing
+            ? prev.map((l) =>
+                l.itemId === itemId
+                  ? { ...l, quantity: l.quantity + quantity }
+                  : l
+              )
+            : [...prev, { itemId, quantity }];
+        });
+      }
+    },
+    [isSignedIn, addMut]
+  );
+
+  const setQuantity = useCallback(
+    (itemId: Id<"items">, quantity: number) => {
+      if (isSignedIn) {
+        void setQtyMut({ itemId, quantity });
+      } else {
+        setGuestLines((prev) =>
+          quantity <= 0
+            ? prev.filter((l) => l.itemId !== itemId)
+            : prev.map((l) => (l.itemId === itemId ? { ...l, quantity } : l))
         );
       }
-      return [...prev, { itemId, quantity }];
-    });
-  }, []);
+    },
+    [isSignedIn, setQtyMut]
+  );
 
-  const setQuantity = useCallback((itemId: Id<"items">, quantity: number) => {
-    // Setting to zero (or below) is the same as removing the line.
-    setLines((prev) =>
-      quantity <= 0
-        ? prev.filter((l) => l.itemId !== itemId)
-        : prev.map((l) => (l.itemId === itemId ? { ...l, quantity } : l))
-    );
-  }, []);
+  const removeItem = useCallback(
+    (itemId: Id<"items">) => {
+      if (isSignedIn) {
+        void removeMut({ itemId });
+      } else {
+        setGuestLines((prev) => prev.filter((l) => l.itemId !== itemId));
+      }
+    },
+    [isSignedIn, removeMut]
+  );
 
-  const removeItem = useCallback((itemId: Id<"items">) => {
-    setLines((prev) => prev.filter((l) => l.itemId !== itemId));
-  }, []);
-
-  const clear = useCallback(() => setLines([]), []);
+  const clear = useCallback(() => {
+    if (isSignedIn) {
+      void clearMut({});
+    } else {
+      setGuestLines([]);
+    }
+  }, [isSignedIn, clearMut]);
 
   const totalCount = useMemo(
     () => lines.reduce((sum, l) => sum + l.quantity, 0),
     [lines]
   );
-
-  // Hydrated once the loaded cart matches the current identity.
-  const hydrated = activeIdentity !== null && activeIdentity === identity;
 
   const value = useMemo<CartApi>(
     () => ({

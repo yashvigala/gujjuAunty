@@ -37,4 +37,16 @@ export default defineSchema({
     imageIds: v.array(v.id("_storage")),
     isActive: v.boolean(),
   }),
+
+  // A signed-in user's shopping cart — one row per item. Living in the DB (not
+  // the browser) is what lets the cart follow the account across devices and
+  // browsers, and update in real time. Guests use a localStorage cart instead
+  // (merged in here on login).
+  cartItems: defineTable({
+    userId: v.id("users"),
+    itemId: v.id("items"),
+    quantity: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_item", ["userId", "itemId"]),
 });
