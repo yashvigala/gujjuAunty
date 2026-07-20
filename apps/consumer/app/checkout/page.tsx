@@ -7,6 +7,7 @@ import {
   Authenticated,
   AuthLoading,
   Unauthenticated,
+  useAction,
   useMutation,
   useQuery,
 } from "convex/react";
@@ -14,6 +15,7 @@ import { ConvexError } from "convex/values";
 import { api } from "@gujjuaunty/backend/convex/_generated/api";
 import { useCart } from "@/lib/cart";
 import { formatPaise } from "@/lib/money";
+import { openRazorpayCheckout } from "@/lib/razorpay";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof ConvexError && typeof err.data === "string") {
@@ -30,6 +32,8 @@ function CheckoutForm() {
   const me = useQuery(api.users.me);
   const items = useQuery(api.items.list);
   const placeOrder = useMutation(api.orders.place);
+  const createRazorpayOrder = useAction(api.payments.createRazorpayOrder);
+  const verifyPayment = useAction(api.payments.verifyPayment);
   const { lines, hydrated } = useCart();
 
   // Delivery details — required. Pre-filled from the saved profile so a
@@ -82,13 +86,53 @@ function CheckoutForm() {
     event.preventDefault();
     setError(null);
     setPlacing(true);
+
+    let orderId;
     try {
-      const orderId = await placeOrder({ name, phone, address });
-      // Payment (Razorpay) hooks in here next; for now the order is created
-      // and the customer lands on its confirmation page.
-      router.push(`/orders/${orderId}`);
+      // 1. Create our order (reserves stock, empties the cart, saves details).
+      orderId = await placeOrder({ name, phone, address });
     } catch (err) {
       setError(errorMessage(err, "Could not place your order"));
+      setPlacing(false);
+      return;
+    }
+
+    try {
+      // 2. Ask Razorpay (server-side, using the secret) for a payment order.
+      const { razorpayOrderId, amount, keyId } = await createRazorpayOrder({
+        orderId,
+      });
+
+      // 3. Let the customer pay in Razorpay's popup.
+      const result = await openRazorpayCheckout({
+        keyId,
+        amount,
+        razorpayOrderId,
+        customerName: name,
+        customerPhone: phone,
+        customerEmail: me?.email ?? undefined,
+      });
+
+      if (result.outcome === "paid") {
+        // 4. Prove the payment is genuine before trusting it. The browser's
+        //    "success" alone is never enough — the server checks the signature.
+        await verifyPayment({
+          orderId,
+          razorpayOrderId: result.response.razorpay_order_id,
+          razorpayPaymentId: result.response.razorpay_payment_id,
+          razorpaySignature: result.response.razorpay_signature,
+        });
+      }
+      // Dismissed or failed payments still have an order to return to — it
+      // stays "Awaiting payment" and can be paid from the order page.
+      router.push(`/orders/${orderId}`);
+    } catch (err) {
+      setError(
+        errorMessage(
+          err,
+          "Your order was created but payment could not be completed"
+        )
+      );
       setPlacing(false);
     }
   }
