@@ -11,6 +11,7 @@ import {
 import { api } from "@gujjuaunty/backend/convex/_generated/api";
 import type { Id } from "@gujjuaunty/backend/convex/_generated/dataModel";
 import { formatPaise } from "@/lib/money";
+import { OrderStatusTracker } from "@/components/OrderStatusTracker";
 
 // The banner must never claim more than actually happened — an unpaid order is
 // not a confirmed order.
@@ -20,17 +21,27 @@ const STATUS_BANNER: Record<
 > = {
   pending_payment: {
     headline: "Payment not completed",
-    detail: "This order isn't confirmed. Nothing has been charged.",
+    detail: "This order isn't confirmed and nothing has been charged.",
     tone: "warn",
   },
   paid: {
     headline: "Order confirmed 🎉",
-    detail: "Payment received — we're getting your snacks ready.",
+    detail: "Thanks! We've received your payment and are preparing your order.",
+    tone: "good",
+  },
+  processing: {
+    headline: "Order confirmed 🎉",
+    detail: "Your snacks are being packed.",
     tone: "good",
   },
   shipped: {
     headline: "On its way 🚚",
-    detail: "Your order has shipped.",
+    detail: "Your order has left our kitchen.",
+    tone: "good",
+  },
+  out_for_delivery: {
+    headline: "Out for delivery 📦",
+    detail: "Your order arrives today.",
     tone: "good",
   },
   delivered: {
@@ -50,6 +61,13 @@ const TONE_CLASSES: Record<string, string> = {
   warn: "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
   bad: "border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300",
 };
+
+function formatDate(ms: number): string {
+  return new Intl.DateTimeFormat("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(ms));
+}
 
 function OrderDetail({ orderId }: { orderId: string }) {
   // The id comes from the URL, so it's untrusted — the backend re-validates it
@@ -73,28 +91,63 @@ function OrderDetail({ orderId }: { orderId: string }) {
     );
   }
 
+  const banner = STATUS_BANNER[order.status];
+  const isPaid = order.status !== "pending_payment" && order.status !== "cancelled";
+
   return (
     <div className="flex flex-col gap-6">
-      {(() => {
-        const banner = STATUS_BANNER[order.status];
-        if (!banner) return null;
-        return (
-          <div
-            className={`rounded-2xl border p-5 ${TONE_CLASSES[banner.tone]}`}
-          >
-            <p className="font-medium">{banner.headline}</p>
-            <p className="mt-1 text-sm opacity-90">{banner.detail}</p>
-            {order.status === "pending_payment" && (
-              <Link
-                href="/cart"
-                className="mt-3 inline-block text-sm underline underline-offset-4"
-              >
-                Back to cart
-              </Link>
-            )}
+      {banner && (
+        <div className={`rounded-2xl border p-5 ${TONE_CLASSES[banner.tone]}`}>
+          <p className="text-lg font-medium">{banner.headline}</p>
+          <p className="mt-1 text-sm opacity-90">{banner.detail}</p>
+          {isPaid && (
+            <p className="mt-2 text-sm opacity-80">
+              A receipt has been sent to your registered email address.
+            </p>
+          )}
+          {order.status === "pending_payment" && (
+            <Link
+              href="/cart"
+              className="mt-3 inline-block text-sm underline underline-offset-4"
+            >
+              Back to cart
+            </Link>
+          )}
+        </div>
+      )}
+
+      {/* Receipt-style summary of the transaction itself. */}
+      <section className="rounded-2xl border border-zinc-200 p-5 text-sm dark:border-zinc-800">
+        <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2">
+          <div>
+            <dt className="text-zinc-500">Order ID</dt>
+            <dd className="font-mono text-xs break-all">{order._id}</dd>
           </div>
-        );
-      })()}
+          <div>
+            <dt className="text-zinc-500">Placed on</dt>
+            <dd>{formatDate(order._creationTime)}</dd>
+          </div>
+          <div>
+            <dt className="text-zinc-500">Amount paid</dt>
+            <dd className="font-medium">{formatPaise(order.total)}</dd>
+          </div>
+          {order.razorpayPaymentId && (
+            <div>
+              <dt className="text-zinc-500">Payment reference</dt>
+              <dd className="font-mono text-xs break-all">
+                {order.razorpayPaymentId}
+              </dd>
+            </div>
+          )}
+        </dl>
+      </section>
+
+      {isPaid && (
+        <section>
+          <h2 className="mb-4 text-lg font-medium">Order status</h2>
+          <OrderStatusTracker status={order.status} />
+        </section>
+      )}
 
       <section>
         <h2 className="mb-3 text-lg font-medium">Items</h2>
@@ -128,12 +181,20 @@ function OrderDetail({ orderId }: { orderId: string }) {
         </p>
       </section>
 
-      <Link
-        href="/"
-        className="text-sm text-zinc-500 underline-offset-4 hover:underline"
-      >
-        ← Continue shopping
-      </Link>
+      <div className="flex gap-4">
+        <Link
+          href="/orders"
+          className="text-sm text-zinc-500 underline-offset-4 hover:underline"
+        >
+          All orders
+        </Link>
+        <Link
+          href="/"
+          className="text-sm text-zinc-500 underline-offset-4 hover:underline"
+        >
+          Continue shopping →
+        </Link>
+      </div>
     </div>
   );
 }
