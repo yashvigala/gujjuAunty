@@ -49,4 +49,43 @@ export default defineSchema({
   })
     .index("by_user", ["userId"])
     .index("by_user_item", ["userId", "itemId"]),
+
+  // Whiteboard: "orders" → id, which customer, what items, complete/not.
+  //
+  // `lines` and `contact` are deliberately SNAPSHOTS taken at purchase time,
+  // not live references: if the shop later renames a product, changes its
+  // price, or the customer edits their profile, past orders must still show
+  // what was actually bought and where it was actually sent.
+  orders: defineTable({
+    userId: v.id("users"),
+    lines: v.array(
+      v.object({
+        itemId: v.id("items"),
+        name: v.string(),
+        price: v.number(), // paise, as charged
+        quantity: v.number(),
+      })
+    ),
+    total: v.number(), // paise — sum of price × quantity
+    contact: v.object({
+      name: v.string(),
+      phone: v.string(),
+      address: v.string(),
+    }),
+    // The whiteboard's "complete / not", expanded because a real payment flow
+    // needs to distinguish "order created" from "money actually received".
+    status: v.union(
+      v.literal("pending_payment"),
+      v.literal("paid"),
+      v.literal("shipped"),
+      v.literal("delivered"),
+      v.literal("cancelled")
+    ),
+    // Razorpay bookkeeping, filled in during the payment step.
+    razorpayOrderId: v.optional(v.string()),
+    razorpayPaymentId: v.optional(v.string()),
+  })
+    .index("by_user", ["userId"])
+    .index("by_status", ["status"])
+    .index("by_razorpay_order", ["razorpayOrderId"]),
 });
