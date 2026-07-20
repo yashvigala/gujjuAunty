@@ -32,6 +32,7 @@ function CheckoutForm() {
   const me = useQuery(api.users.me);
   const items = useQuery(api.items.list);
   const placeOrder = useMutation(api.orders.place);
+  const cancelPending = useMutation(api.orders.cancelPending);
   const createRazorpayOrder = useAction(api.payments.createRazorpayOrder);
   const verifyPayment = useAction(api.payments.verifyPayment);
   const { lines, hydrated } = useCart();
@@ -113,26 +114,36 @@ function CheckoutForm() {
         customerEmail: me?.email ?? undefined,
       });
 
-      if (result.outcome === "paid") {
-        // 4. Prove the payment is genuine before trusting it. The browser's
-        //    "success" alone is never enough — the server checks the signature.
-        await verifyPayment({
-          orderId,
-          razorpayOrderId: result.response.razorpay_order_id,
-          razorpayPaymentId: result.response.razorpay_payment_id,
-          razorpaySignature: result.response.razorpay_signature,
-        });
+      // Nothing is confirmed unless the customer actually paid. On dismiss or
+      // failure we stay put with the cart untouched, so they can change their
+      // mind, edit the cart, or simply walk away.
+      if (result.outcome !== "paid") {
+        await cancelPending({ orderId });
+        setError(
+          result.outcome === "dismissed"
+            ? "Payment cancelled — your cart is still here whenever you're ready."
+            : `Payment failed: ${result.message}. Your cart is unchanged.`
+        );
+        setPlacing(false);
+        return;
       }
-      // Dismissed or failed payments still have an order to return to — it
-      // stays "Awaiting payment" and can be paid from the order page.
+
+      // 4. Prove the payment is genuine before trusting it. The browser's
+      //    "success" alone is never enough — the server checks the signature,
+      //    and only then are the cart and stock updated.
+      await verifyPayment({
+        orderId,
+        razorpayOrderId: result.response.razorpay_order_id,
+        razorpayPaymentId: result.response.razorpay_payment_id,
+        razorpaySignature: result.response.razorpay_signature,
+      });
+
       router.push(`/orders/${orderId}`);
     } catch (err) {
-      setError(
-        errorMessage(
-          err,
-          "Your order was created but payment could not be completed"
-        )
-      );
+      // Payment didn't complete — release the attempt so the customer isn't
+      // left with a phantom order.
+      await cancelPending({ orderId }).catch(() => {});
+      setError(errorMessage(err, "Payment could not be completed"));
       setPlacing(false);
     }
   }
