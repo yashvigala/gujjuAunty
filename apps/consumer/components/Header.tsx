@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Authenticated, Unauthenticated, useQuery } from "convex/react";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { api } from "@gujjuaunty/backend/convex/_generated/api";
@@ -49,13 +50,55 @@ function UserMenu() {
   );
 }
 
+// Primary site navigation. `usePathname` lets the current page's link show as
+// active, so you always know where you are.
+const NAV_LINKS = [
+  { href: "/", label: "Home" },
+  { href: "/orders", label: "Orders" },
+  { href: "/about", label: "About us" },
+] as const;
+
+function MainNav() {
+  const pathname = usePathname();
+
+  return (
+    <nav className="flex items-center gap-1">
+      {NAV_LINKS.map((link) => {
+        // "/" would otherwise match every route, so it needs an exact check.
+        const isActive =
+          link.href === "/"
+            ? pathname === "/"
+            : pathname.startsWith(link.href);
+
+        return (
+          <Link
+            key={link.href}
+            href={link.href}
+            aria-current={isActive ? "page" : undefined}
+            className={`rounded-full px-3 py-1 text-sm transition-colors ${
+              isActive
+                ? "bg-zinc-100 font-medium text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
+                : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            }`}
+          >
+            {link.label}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
 export function Header() {
   return (
-    <header className="flex items-center justify-between border-b border-zinc-200 px-6 py-3 dark:border-zinc-800">
-      <Link href="/" className="text-lg font-bold">
-        GujjuAunty
-      </Link>
-      <nav className="flex items-center gap-4">
+    <header className="flex items-center justify-between gap-4 border-b border-zinc-200 px-6 py-3 dark:border-zinc-800">
+      <div className="flex min-w-0 items-center gap-6">
+        <Link href="/" className="shrink-0 text-lg font-bold">
+          GujjuAunty
+        </Link>
+        <MainNav />
+      </div>
+      <nav className="flex shrink-0 items-center gap-4">
         <CartLink />
         <Unauthenticated>
           <Link
