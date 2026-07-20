@@ -32,9 +32,12 @@ function UserMenu() {
 
   return (
     <div className="flex items-center gap-3">
-      <span className="text-sm text-zinc-600 dark:text-zinc-300">
-        {me?.name ?? me?.email ?? ""}
-      </span>
+      <Link
+        href="/profile"
+        className="text-sm text-zinc-600 underline-offset-4 hover:underline dark:text-zinc-300"
+      >
+        {me?.name ?? me?.email ?? "Profile"}
+      </Link>
       <button
         type="button"
         onClick={() => void signOut()}
