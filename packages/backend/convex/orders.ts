@@ -114,6 +114,21 @@ export const cancelPending = mutation({
   },
 });
 
+// The signed-in customer's own orders, newest first — the whiteboard's
+// "show orders" / "order history".
+export const listMine = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) return [];
+    return ctx.db
+      .query("orders")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .order("desc")
+      .collect();
+  },
+});
+
 // A single order, only readable by the customer who placed it.
 export const get = query({
   args: { orderId: v.id("orders") },
