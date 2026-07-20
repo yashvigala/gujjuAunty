@@ -4,6 +4,7 @@ import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { ConvexError } from "convex/values";
+import { PasswordInput } from "@/components/PasswordInput";
 
 type Flow = "signIn" | "signUp";
 
@@ -88,12 +89,10 @@ export default function LoginPage() {
             autoComplete="email"
             required
           />
-          <input
-            type="password"
+          <PasswordInput
             placeholder="Password (min 8 characters)"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className={inputClasses}
             autoComplete={flow === "signIn" ? "current-password" : "new-password"}
             required
             minLength={8}
