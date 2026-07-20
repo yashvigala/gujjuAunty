@@ -1,4 +1,9 @@
-import { action, internalMutation, internalQuery } from "./_generated/server";
+import {
+  action,
+  internalAction,
+  internalMutation,
+  internalQuery,
+} from "./_generated/server";
 import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import { getAuthUserId } from "@convex-dev/auth/server";
@@ -97,6 +102,41 @@ export const markPaid = internalMutation({
   },
 });
 
+// Ops helper: look up what Razorpay recorded against a given payment order.
+// internalAction = runnable from the CLI/cron for support and reconciliation,
+// never callable from a browser.
+export const inspectRazorpayOrder = internalAction({
+  args: { razorpayOrderId: v.string() },
+  handler: async (_ctx, { razorpayOrderId }): Promise<string> => {
+    const { keyId, keySecret } = credentials();
+    const response = await fetch(`${RAZORPAY_API}/${razorpayOrderId}/payments`, {
+      headers: { Authorization: `Basic ${btoa(`${keyId}:${keySecret}`)}` },
+    });
+    if (!response.ok) return `ERROR ${response.status}`;
+    const data: unknown = await response.json();
+    const items =
+      typeof data === "object" && data !== null && "items" in data
+        ? (data as { items: unknown }).items
+        : [];
+    if (!Array.isArray(items) || items.length === 0) return "no payments";
+    return items
+      .map((p) => {
+        const rec = p as { id?: unknown; status?: unknown; method?: unknown };
+        return `${String(rec.id)} status=${String(rec.status)} method=${String(rec.method)}`;
+      })
+      .join("; ");
+  },
+});
+
+export const cancelIfPending = internalMutation({
+  args: { orderId: v.id("orders") },
+  handler: async (ctx, { orderId }) => {
+    const order = await ctx.db.get(orderId);
+    if (!order || order.status !== "pending_payment") return;
+    await ctx.db.patch(orderId, { status: "cancelled" });
+  },
+});
+
 // ── Public actions ──────────────────────────────────────────────────────────
 
 // Step 1 of payment: ask Razorpay to create a payment order for one of ours.
@@ -157,6 +197,79 @@ export const createRazorpayOrder = action({
 
     // keyId is public — the browser needs it to open the checkout popup.
     return { razorpayOrderId, amount: order.total, keyId };
+  },
+});
+
+// When the payment window closes without reporting success, we must NOT assume
+// the customer abandoned it. Netbanking and UPI redirect away from the popup
+// and can close it even though the money went through. So instead of trusting
+// the browser, we ask Razorpay what actually happened to this order and settle
+// it accordingly. This is the difference between "the browser said nothing" and
+// "no payment was made".
+export const reconcileOrder = action({
+  args: { orderId: v.id("orders") },
+  handler: async (
+    ctx,
+    { orderId }
+  ): Promise<{ status: "paid" | "cancelled" }> => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new ConvexError("Please sign in");
+
+    const order = await ctx.runQuery(internal.payments.loadOwnOrder, {
+      orderId,
+      userId: userId as Id<"users">,
+    });
+    if (!order) throw new ConvexError("Order not found");
+    if (order.status === "paid") return { status: "paid" };
+
+    // Never reached Razorpay at all — nothing could have been charged.
+    if (!order.razorpayOrderId) {
+      await ctx.runMutation(internal.payments.cancelIfPending, { orderId });
+      return { status: "cancelled" };
+    }
+
+    const { keyId, keySecret } = credentials();
+    const response = await fetch(
+      `${RAZORPAY_API}/${order.razorpayOrderId}/payments`,
+      { headers: { Authorization: `Basic ${btoa(`${keyId}:${keySecret}`)}` } }
+    );
+
+    if (!response.ok) {
+      // Can't confirm either way — leave it pending rather than wrongly
+      // cancelling an order that may well have been paid.
+      console.error("Razorpay reconcile failed", await response.text());
+      throw new ConvexError(
+        "We couldn't confirm your payment status — please check your orders in a moment"
+      );
+    }
+
+    const data: unknown = await response.json();
+    const items =
+      typeof data === "object" && data !== null && "items" in data
+        ? (data as { items: unknown }).items
+        : undefined;
+
+    const paid = Array.isArray(items)
+      ? items.find(
+          (p): p is { id: string; status: string } =>
+            typeof p === "object" &&
+            p !== null &&
+            typeof (p as { id?: unknown }).id === "string" &&
+            ((p as { status?: unknown }).status === "captured" ||
+              (p as { status?: unknown }).status === "authorized")
+        )
+      : undefined;
+
+    if (paid) {
+      await ctx.runMutation(internal.payments.markPaid, {
+        orderId,
+        razorpayPaymentId: paid.id,
+      });
+      return { status: "paid" };
+    }
+
+    await ctx.runMutation(internal.payments.cancelIfPending, { orderId });
+    return { status: "cancelled" };
   },
 });
 
