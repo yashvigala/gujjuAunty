@@ -14,6 +14,7 @@ import {
 import { useAuthActions } from "@convex-dev/auth/react";
 import { ConvexError } from "convex/values";
 import { api } from "@gujjuaunty/backend/convex/_generated/api";
+import { PasswordInput } from "@/components/PasswordInput";
 
 // Errors arrive as `unknown`. Ours (ConvexError) carry a safe message in
 // `.data`; anything else falls back so internals never leak into the UI.
@@ -191,11 +192,9 @@ function ChangePassword() {
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
       <label className="flex flex-col gap-1">
         <span className="text-sm">Current password</span>
-        <input
-          type="password"
+        <PasswordInput
           value={currentPassword}
           onChange={(e) => setCurrentPassword(e.target.value)}
-          className={inputClasses}
           autoComplete="current-password"
           required
         />
@@ -203,11 +202,9 @@ function ChangePassword() {
 
       <label className="flex flex-col gap-1">
         <span className="text-sm">New password</span>
-        <input
-          type="password"
+        <PasswordInput
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
-          className={inputClasses}
           autoComplete="new-password"
           minLength={8}
           required
@@ -216,11 +213,9 @@ function ChangePassword() {
 
       <label className="flex flex-col gap-1">
         <span className="text-sm">Confirm new password</span>
-        <input
-          type="password"
+        <PasswordInput
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
-          className={inputClasses}
           autoComplete="new-password"
           minLength={8}
           required
