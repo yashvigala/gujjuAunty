@@ -154,18 +154,13 @@ export default function CartPage() {
         <span className="text-2xl font-bold tabular-nums">{formatPaise(total)}</span>
       </div>
 
-      <div className="mt-6 flex flex-col items-end gap-2">
-        {/* Checkout + payment (Razorpay) arrive in the next feature. */}
-        <button
-          type="button"
-          disabled
-          className="cursor-not-allowed rounded-full bg-zinc-200 px-8 py-3 font-medium text-zinc-500 dark:bg-zinc-800"
+      <div className="mt-6 flex justify-end">
+        <Link
+          href="/checkout"
+          className="rounded-full bg-zinc-900 px-8 py-3 font-medium text-white transition-colors hover:bg-zinc-700 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-300"
         >
           Proceed to checkout
-        </button>
-        <span className="text-xs text-zinc-400">
-          Checkout &amp; payment arrive in the next update.
-        </span>
+        </Link>
       </div>
     </main>
   );
