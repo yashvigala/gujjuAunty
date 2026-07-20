@@ -32,9 +32,9 @@ function CheckoutForm() {
   const me = useQuery(api.users.me);
   const items = useQuery(api.items.list);
   const placeOrder = useMutation(api.orders.place);
-  const cancelPending = useMutation(api.orders.cancelPending);
   const createRazorpayOrder = useAction(api.payments.createRazorpayOrder);
   const verifyPayment = useAction(api.payments.verifyPayment);
+  const reconcileOrder = useAction(api.payments.reconcileOrder);
   const { lines, hydrated } = useCart();
 
   // Delivery details — required. Pre-filled from the saved profile so a
@@ -114,11 +114,16 @@ function CheckoutForm() {
         customerEmail: me?.email ?? undefined,
       });
 
-      // Nothing is confirmed unless the customer actually paid. On dismiss or
-      // failure we stay put with the cart untouched, so they can change their
-      // mind, edit the cart, or simply walk away.
+      // The popup closed without reporting success — but that does NOT mean no
+      // payment happened. Netbanking and UPI redirect away and can close the
+      // window even on success, so we ask Razorpay what really occurred rather
+      // than assuming the worst and cancelling a paid order.
       if (result.outcome !== "paid") {
-        await cancelPending({ orderId });
+        const settled = await reconcileOrder({ orderId });
+        if (settled.status === "paid") {
+          router.push(`/orders/${orderId}`);
+          return;
+        }
         setError(
           result.outcome === "dismissed"
             ? "Payment cancelled — your cart is still here whenever you're ready."
@@ -140,9 +145,13 @@ function CheckoutForm() {
 
       router.push(`/orders/${orderId}`);
     } catch (err) {
-      // Payment didn't complete — release the attempt so the customer isn't
-      // left with a phantom order.
-      await cancelPending({ orderId }).catch(() => {});
+      // Something went wrong mid-flow. Check with Razorpay before concluding
+      // anything — the payment may still have succeeded.
+      const settled = await reconcileOrder({ orderId }).catch(() => null);
+      if (settled?.status === "paid") {
+        router.push(`/orders/${orderId}`);
+        return;
+      }
       setError(errorMessage(err, "Payment could not be completed"));
       setPlacing(false);
     }
