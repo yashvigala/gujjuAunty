@@ -53,6 +53,44 @@
   border-color: var(--accent-border);
 }
 
+/* Password field with a show/hide toggle sitting inside the input. */
+.password-wrap {
+  position: relative;
+  display: flex;
+}
+
+.password-wrap input {
+  flex: 1;
+  padding-right: 38px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.password-toggle:hover {
+  color: var(--text-h);
+}
+
+.password-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+
 .btn {
   font: inherit;
   font-size: 15px;
