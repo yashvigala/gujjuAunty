@@ -12,12 +12,43 @@ import { api } from "@gujjuaunty/backend/convex/_generated/api";
 import type { Id } from "@gujjuaunty/backend/convex/_generated/dataModel";
 import { formatPaise } from "@/lib/money";
 
-const STATUS_LABELS: Record<string, string> = {
-  pending_payment: "Awaiting payment",
-  paid: "Paid",
-  shipped: "Shipped",
-  delivered: "Delivered",
-  cancelled: "Cancelled",
+// The banner must never claim more than actually happened — an unpaid order is
+// not a confirmed order.
+const STATUS_BANNER: Record<
+  string,
+  { headline: string; detail: string; tone: "good" | "warn" | "bad" }
+> = {
+  pending_payment: {
+    headline: "Payment not completed",
+    detail: "This order isn't confirmed. Nothing has been charged.",
+    tone: "warn",
+  },
+  paid: {
+    headline: "Order confirmed 🎉",
+    detail: "Payment received — we're getting your snacks ready.",
+    tone: "good",
+  },
+  shipped: {
+    headline: "On its way 🚚",
+    detail: "Your order has shipped.",
+    tone: "good",
+  },
+  delivered: {
+    headline: "Delivered ✅",
+    detail: "Enjoy your snacks!",
+    tone: "good",
+  },
+  cancelled: {
+    headline: "Order cancelled",
+    detail: "This order was cancelled and you have not been charged.",
+    tone: "bad",
+  },
+};
+
+const TONE_CLASSES: Record<string, string> = {
+  good: "border-green-300 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300",
+  warn: "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
+  bad: "border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300",
 };
 
 function OrderDetail({ orderId }: { orderId: string }) {
@@ -44,14 +75,26 @@ function OrderDetail({ orderId }: { orderId: string }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="rounded-2xl border border-green-300 bg-green-50 p-5 dark:border-green-900 dark:bg-green-950/40">
-        <p className="font-medium text-green-800 dark:text-green-300">
-          Order placed 🎉
-        </p>
-        <p className="mt-1 text-sm text-green-700 dark:text-green-400">
-          Status: {STATUS_LABELS[order.status] ?? order.status}
-        </p>
-      </div>
+      {(() => {
+        const banner = STATUS_BANNER[order.status];
+        if (!banner) return null;
+        return (
+          <div
+            className={`rounded-2xl border p-5 ${TONE_CLASSES[banner.tone]}`}
+          >
+            <p className="font-medium">{banner.headline}</p>
+            <p className="mt-1 text-sm opacity-90">{banner.detail}</p>
+            {order.status === "pending_payment" && (
+              <Link
+                href="/cart"
+                className="mt-3 inline-block text-sm underline underline-offset-4"
+              >
+                Back to cart
+              </Link>
+            )}
+          </div>
+        );
+      })()}
 
       <section>
         <h2 className="mb-3 text-lg font-medium">Items</h2>
