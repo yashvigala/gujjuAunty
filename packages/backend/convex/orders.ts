@@ -78,6 +78,11 @@ export const place = mutation({
 
     const total = lines.reduce((sum, l) => sum + l.price * l.quantity, 0);
 
+    // This records an ATTEMPT to buy, nothing more. The cart is deliberately
+    // left alone and stock is NOT deducted yet — none of that may happen until
+    // payment is actually verified (see payments.markPaid). Otherwise closing
+    // the payment window would empty someone's cart for an order they never
+    // paid for.
     const orderId = await ctx.db.insert("orders", {
       userId,
       lines,
@@ -86,22 +91,8 @@ export const place = mutation({
       status: "pending_payment",
     });
 
-    // Reserve the stock now that the order exists.
-    for (const line of lines) {
-      const item = await ctx.db.get(line.itemId);
-      if (item) {
-        await ctx.db.patch(line.itemId, {
-          stock: item.stock - line.quantity,
-        });
-      }
-    }
-
-    // Empty the cart — the order now owns these items.
-    for (const row of cartRows) {
-      await ctx.db.delete(row._id);
-    }
-
-    // Remember the details for next time, the way Blinkit/Zepto do.
+    // Remember the details for next time, the way Blinkit/Zepto do. This is
+    // safe to keep even if payment is abandoned — it's just their address.
     await ctx.db.patch(userId, contact);
 
     return orderId;

@@ -64,10 +64,36 @@ export const attachRazorpayOrder = internalMutation({
   },
 });
 
+// Payment is confirmed — only NOW do the side effects of buying happen:
+// the order flips to paid, stock comes down, and the cart empties. Doing this
+// any earlier would punish a customer who closed the payment window.
+// Written to be idempotent: running it twice is harmless.
 export const markPaid = internalMutation({
   args: { orderId: v.id("orders"), razorpayPaymentId: v.string() },
   handler: async (ctx, { orderId, razorpayPaymentId }) => {
+    const order = await ctx.db.get(orderId);
+    if (!order || order.status === "paid") return;
+
     await ctx.db.patch(orderId, { status: "paid", razorpayPaymentId });
+
+    // Deduct the stock that was just sold.
+    for (const line of order.lines) {
+      const item = await ctx.db.get(line.itemId);
+      if (item) {
+        await ctx.db.patch(line.itemId, {
+          stock: Math.max(0, item.stock - line.quantity),
+        });
+      }
+    }
+
+    // Empty the cart — these items are bought and paid for now.
+    const cartRows = await ctx.db
+      .query("cartItems")
+      .withIndex("by_user", (q) => q.eq("userId", order.userId))
+      .collect();
+    for (const row of cartRows) {
+      await ctx.db.delete(row._id);
+    }
   },
 });
 
