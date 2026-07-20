@@ -99,6 +99,21 @@ export const place = mutation({
   },
 });
 
+// Called when the customer closes or fails the payment window. The attempt is
+// marked cancelled so abandoned orders don't pile up as "awaiting payment".
+// Deliberately refuses to touch an order that's already paid.
+export const cancelPending = mutation({
+  args: { orderId: v.id("orders") },
+  handler: async (ctx, { orderId }) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) return;
+    const order = await ctx.db.get(orderId);
+    if (!order || order.userId !== userId) return;
+    if (order.status !== "pending_payment") return;
+    await ctx.db.patch(orderId, { status: "cancelled" });
+  },
+});
+
 // A single order, only readable by the customer who placed it.
 export const get = query({
   args: { orderId: v.id("orders") },
