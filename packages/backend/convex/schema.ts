@@ -72,12 +72,16 @@ export default defineSchema({
       phone: v.string(),
       address: v.string(),
     }),
-    // The whiteboard's "complete / not", expanded because a real payment flow
-    // needs to distinguish "order created" from "money actually received".
+    // The whiteboard's "complete / not", expanded into the stages a shipped
+    // order actually passes through — the same progression a clothing store
+    // shows ("confirmed → packed → in transit → out for delivery → delivered").
+    // `pending_payment` and `cancelled` sit outside that happy path.
     status: v.union(
       v.literal("pending_payment"),
-      v.literal("paid"),
-      v.literal("shipped"),
+      v.literal("paid"), // payment received — order confirmed
+      v.literal("processing"), // being packed
+      v.literal("shipped"), // in transit
+      v.literal("out_for_delivery"),
       v.literal("delivered"),
       v.literal("cancelled")
     ),
