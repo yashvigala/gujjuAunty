@@ -5,17 +5,16 @@ import type { QueryCtx } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 
 // The stages an admin can move an order through, and what each one may become
-// next. Encoding the allowed transitions here (rather than letting any status
-// jump to any other) prevents nonsense like marking a cancelled order
-// "delivered", or shipping something that was never paid for.
+// next. It is FORWARD-ONLY: once an order exists it has already been paid for,
+// and there is no cancellation here — cancelling a paid order would mean
+// refunding money, which is a separate flow we don't offer. So fulfilment only
+// ever advances.
 const NEXT_STATUS: Record<string, string[]> = {
-  paid: ["processing", "cancelled"],
-  processing: ["shipped", "cancelled"],
+  paid: ["processing"],
+  processing: ["shipped"],
   shipped: ["out_for_delivery"],
   out_for_delivery: ["delivered"],
   delivered: [],
-  cancelled: [],
-  pending_payment: ["cancelled"], // an unpaid order can only be abandoned
 };
 
 // Admin view of a single order = the order itself plus the customer it belongs
@@ -42,7 +41,7 @@ export const list = query({
   },
 });
 
-// Move an order to a new status, but only along an allowed path.
+// Advance an order to its next fulfilment stage, only along an allowed path.
 export const updateStatus = mutation({
   args: {
     orderId: v.id("orders"),
@@ -50,8 +49,7 @@ export const updateStatus = mutation({
       v.literal("processing"),
       v.literal("shipped"),
       v.literal("out_for_delivery"),
-      v.literal("delivered"),
-      v.literal("cancelled")
+      v.literal("delivered")
     ),
   },
   handler: async (ctx, { orderId, status }) => {
@@ -64,19 +62,6 @@ export const updateStatus = mutation({
       throw new ConvexError(
         `Can't move an order from "${order.status}" to "${status}"`
       );
-    }
-
-    // Cancelling a paid order puts the stock back — those items are for sale
-    // again. (Payment refunds are a separate, out-of-scope concern.)
-    if (status === "cancelled" && order.status !== "pending_payment") {
-      for (const line of order.lines) {
-        const item = await ctx.db.get(line.itemId);
-        if (item) {
-          await ctx.db.patch(line.itemId, {
-            stock: item.stock + line.quantity,
-          });
-        }
-      }
     }
 
     await ctx.db.patch(orderId, { status });

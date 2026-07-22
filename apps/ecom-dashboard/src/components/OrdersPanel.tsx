@@ -23,7 +23,6 @@ const ACTION_LABEL: Record<string, string> = {
   shipped: 'Mark shipped',
   out_for_delivery: 'Out for delivery',
   delivered: 'Mark delivered',
-  cancelled: 'Cancel order',
 }
 
 function OrderRow({ order }: { order: AdminOrder }) {
@@ -97,7 +96,7 @@ function OrderRow({ order }: { order: AdminOrder }) {
           {order.nextStatuses.map((next) => (
             <button
               key={next}
-              className={`btn slim ${next === 'cancelled' ? 'danger' : ''}`}
+              className="btn slim"
               disabled={busy}
               onClick={() => void move(next)}
             >
