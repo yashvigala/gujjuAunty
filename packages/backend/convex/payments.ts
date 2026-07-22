@@ -1,16 +1,12 @@
-import {
-  action,
-  internalAction,
-  internalMutation,
-  internalQuery,
-} from "./_generated/server";
+import { action, internalAction, internalMutation, internalQuery } from "./_generated/server";
 import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import { getAuthUserId } from "@convex-dev/auth/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import { validateContact } from "./orders";
 
-// Razorpay talks in paise, which is exactly how we store prices — no
-// conversion, no rounding.
+// Razorpay talks in paise, which is exactly how we store prices — no conversion.
 const RAZORPAY_API = "https://api.razorpay.com/v1/orders";
 
 function credentials(): { keyId: string; keySecret: string } {
@@ -24,65 +20,120 @@ function credentials(): { keyId: string; keySecret: string } {
   return { keyId, keySecret };
 }
 
-// HMAC-SHA256 as lowercase hex, via Web Crypto (no Node runtime needed).
-async function hmacSha256Hex(secret: string, message: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(message));
-  return Array.from(new Uint8Array(signature))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+function authHeader(keyId: string, keySecret: string): string {
+  // Razorpay authenticates with HTTP Basic: keyId as user, secret as password.
+  return `Basic ${btoa(`${keyId}:${keySecret}`)}`;
 }
 
-// Constant-time compare so a wrong signature can't be guessed byte-by-byte
-// from response timing.
-function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+// Read the user's cart and turn it into order lines, validating every item is
+// still available and in stock. Shared by the "get amount" query and the
+// "create the order" mutation so the two can never disagree on the maths.
+async function snapshotCart(ctx: QueryCtx | MutationCtx, userId: Id<"users">) {
+  const rows = await ctx.db
+    .query("cartItems")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .collect();
+  if (rows.length === 0) throw new ConvexError("Your cart is empty");
+
+  const lines = [];
+  for (const row of rows) {
+    const item = await ctx.db.get(row.itemId);
+    if (!item || !item.isActive) {
+      throw new ConvexError(
+        "An item in your cart is no longer available — please review your cart"
+      );
+    }
+    if (row.quantity > item.stock) {
+      throw new ConvexError(
+        `Only ${item.stock} × ${item.name} left in stock — please update your cart`
+      );
+    }
+    lines.push({
+      itemId: item._id,
+      name: item.name,
+      price: item.price,
+      quantity: row.quantity,
+    });
   }
-  return diff === 0;
+
+  const total = lines.reduce((sum, l) => sum + l.price * l.quantity, 0);
+  return { rows, lines, total };
 }
 
-// ── Internal helpers (not part of the public API) ───────────────────────────
+// ── Internal helpers (never callable from a browser) ────────────────────────
 
-export const loadOwnOrder = internalQuery({
-  args: { orderId: v.id("orders"), userId: v.id("users") },
-  handler: async (ctx, { orderId, userId }) => {
-    const order = await ctx.db.get(orderId);
-    if (!order || order.userId !== userId) return null;
-    return order;
+// Amount to charge for the current cart. Throws if the cart can't be ordered.
+export const cartTotal = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => {
+    const { total } = await snapshotCart(ctx, userId);
+    return total;
   },
 });
 
-export const attachRazorpayOrder = internalMutation({
-  args: { orderId: v.id("orders"), razorpayOrderId: v.string() },
-  handler: async (ctx, { orderId, razorpayOrderId }) => {
-    await ctx.db.patch(orderId, { razorpayOrderId });
+// Has an order already been created for this Razorpay order? Used to make order
+// creation idempotent — a success callback AND a reconcile can both fire, but
+// only one order must ever result.
+export const orderByRazorpay = internalQuery({
+  args: { razorpayOrderId: v.string() },
+  handler: async (ctx, { razorpayOrderId }) => {
+    return ctx.db
+      .query("orders")
+      .withIndex("by_razorpay_order", (q) =>
+        q.eq("razorpayOrderId", razorpayOrderId)
+      )
+      .unique();
   },
 });
 
-// Payment is confirmed — only NOW do the side effects of buying happen:
-// the order flips to paid, stock comes down, and the cart empties. Doing this
-// any earlier would punish a customer who closed the payment window.
-// Written to be idempotent: running it twice is harmless.
-export const markPaid = internalMutation({
-  args: { orderId: v.id("orders"), razorpayPaymentId: v.string() },
-  handler: async (ctx, { orderId, razorpayPaymentId }) => {
-    const order = await ctx.db.get(orderId);
-    if (!order || order.status === "paid") return;
+// THE moment an order comes into existence — and only ever after a verified
+// payment. Rebuilds the order from the cart, checks the total matches what was
+// actually charged, then records it, deducts stock and empties the cart, all in
+// one transaction. Idempotent on razorpayOrderId.
+export const createPaidOrder = internalMutation({
+  args: {
+    userId: v.id("users"),
+    razorpayOrderId: v.string(),
+    razorpayPaymentId: v.string(),
+    paidAmount: v.number(),
+    contact: v.object({
+      name: v.string(),
+      phone: v.string(),
+      address: v.string(),
+    }),
+  },
+  handler: async (ctx, args): Promise<Id<"orders">> => {
+    // Already created (e.g. success + reconcile raced) — return the existing one.
+    const existing = await ctx.db
+      .query("orders")
+      .withIndex("by_razorpay_order", (q) =>
+        q.eq("razorpayOrderId", args.razorpayOrderId)
+      )
+      .unique();
+    if (existing) return existing._id;
 
-    await ctx.db.patch(orderId, { status: "paid", razorpayPaymentId });
+    const { rows, lines, total } = await snapshotCart(ctx, args.userId);
+
+    // The cart must still be worth exactly what Razorpay charged. If the
+    // customer changed it mid-payment, refuse rather than record a wrong order.
+    if (total !== args.paidAmount) {
+      throw new ConvexError(
+        "Your cart changed during payment — please contact support to resolve this order"
+      );
+    }
+
+    const orderId = await ctx.db.insert("orders", {
+      userId: args.userId,
+      lines,
+      total,
+      contact: args.contact,
+      status: "paid",
+      razorpayOrderId: args.razorpayOrderId,
+      razorpayPaymentId: args.razorpayPaymentId,
+    });
 
     // Deduct the stock that was just sold.
-    for (const line of order.lines) {
+    for (const line of lines) {
       const item = await ctx.db.get(line.itemId);
       if (item) {
         await ctx.db.patch(line.itemId, {
@@ -92,25 +143,24 @@ export const markPaid = internalMutation({
     }
 
     // Empty the cart — these items are bought and paid for now.
-    const cartRows = await ctx.db
-      .query("cartItems")
-      .withIndex("by_user", (q) => q.eq("userId", order.userId))
-      .collect();
-    for (const row of cartRows) {
+    for (const row of rows) {
       await ctx.db.delete(row._id);
     }
+
+    // Remember the delivery details for next time.
+    await ctx.db.patch(args.userId, args.contact);
+
+    return orderId;
   },
 });
 
-// Ops helper: look up what Razorpay recorded against a given payment order.
-// internalAction = runnable from the CLI/cron for support and reconciliation,
-// never callable from a browser.
+// Ops helper: what did Razorpay record against a payment order? CLI-only.
 export const inspectRazorpayOrder = internalAction({
   args: { razorpayOrderId: v.string() },
   handler: async (_ctx, { razorpayOrderId }): Promise<string> => {
     const { keyId, keySecret } = credentials();
     const response = await fetch(`${RAZORPAY_API}/${razorpayOrderId}/payments`, {
-      headers: { Authorization: `Basic ${btoa(`${keyId}:${keySecret}`)}` },
+      headers: { Authorization: authHeader(keyId, keySecret) },
     });
     if (!response.ok) return `ERROR ${response.status}`;
     const data: unknown = await response.json();
@@ -128,55 +178,86 @@ export const inspectRazorpayOrder = internalAction({
   },
 });
 
-export const cancelIfPending = internalMutation({
-  args: { orderId: v.id("orders") },
-  handler: async (ctx, { orderId }) => {
-    const order = await ctx.db.get(orderId);
-    if (!order || order.status !== "pending_payment") return;
-    await ctx.db.patch(orderId, { status: "cancelled" });
-  },
-});
+// Look up a captured/authorized payment on a Razorpay order, and the notes we
+// stamped it with. Returns null when nothing was actually paid.
+async function fetchPaidPayment(
+  keyId: string,
+  keySecret: string,
+  razorpayOrderId: string
+): Promise<{ paymentId: string; amount: number; notesUserId: string } | null> {
+  const headers = { Authorization: authHeader(keyId, keySecret) };
+
+  const orderRes = await fetch(`${RAZORPAY_API}/${razorpayOrderId}`, { headers });
+  if (!orderRes.ok) {
+    throw new ConvexError("Could not confirm your payment — please try again");
+  }
+  const orderData = (await orderRes.json()) as {
+    amount?: unknown;
+    notes?: { userId?: unknown };
+  };
+
+  const payRes = await fetch(`${RAZORPAY_API}/${razorpayOrderId}/payments`, {
+    headers,
+  });
+  if (!payRes.ok) {
+    throw new ConvexError("Could not confirm your payment — please try again");
+  }
+  const payData = (await payRes.json()) as { items?: unknown };
+  const items = Array.isArray(payData.items) ? payData.items : [];
+
+  const paid = items.find(
+    (p): p is { id: string; status: string } =>
+      typeof p === "object" &&
+      p !== null &&
+      typeof (p as { id?: unknown }).id === "string" &&
+      ((p as { status?: unknown }).status === "captured" ||
+        (p as { status?: unknown }).status === "authorized")
+  );
+  if (!paid) return null;
+
+  return {
+    paymentId: paid.id,
+    amount: typeof orderData.amount === "number" ? orderData.amount : -1,
+    notesUserId:
+      typeof orderData.notes?.userId === "string" ? orderData.notes.userId : "",
+  };
+}
 
 // ── Public actions ──────────────────────────────────────────────────────────
 
-// Step 1 of payment: ask Razorpay to create a payment order for one of ours.
-// This is an action (not a mutation) because it makes an outbound HTTP call.
+// Step 1: begin checkout. Validates the cart and contact, then asks Razorpay to
+// create a payment order for the exact cart total. Crucially, NOTHING is written
+// to our database here — no order exists until the money is confirmed.
 export const createRazorpayOrder = action({
-  args: { orderId: v.id("orders") },
+  args: { name: v.string(), phone: v.string(), address: v.string() },
   handler: async (
     ctx,
-    { orderId }
+    args
   ): Promise<{ razorpayOrderId: string; amount: number; keyId: string }> => {
     const userId = await getAuthUserId(ctx);
-    if (userId === null) throw new ConvexError("Please sign in");
+    if (userId === null) throw new ConvexError("Please sign in to check out");
+    validateContact(args);
 
-    const order = await ctx.runQuery(internal.payments.loadOwnOrder, {
-      orderId,
+    const amount = await ctx.runQuery(internal.payments.cartTotal, {
       userId: userId as Id<"users">,
     });
-    if (!order) throw new ConvexError("Order not found");
-    if (order.status !== "pending_payment") {
-      throw new ConvexError("This order has already been paid for");
-    }
 
     const { keyId, keySecret } = credentials();
-
     const response = await fetch(RAZORPAY_API, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // Razorpay authenticates with HTTP Basic: keyId as user, secret as pass.
-        Authorization: `Basic ${btoa(`${keyId}:${keySecret}`)}`,
+        Authorization: authHeader(keyId, keySecret),
       },
       body: JSON.stringify({
-        amount: order.total, // already paise
+        amount,
         currency: "INR",
-        receipt: orderId,
+        // Stamp the buyer so we can prove ownership when we confirm later.
+        notes: { userId },
       }),
     });
 
     if (!response.ok) {
-      // Never surface Razorpay's raw error body to the browser.
       console.error("Razorpay order creation failed", await response.text());
       throw new ConvexError("Could not start payment — please try again");
     }
@@ -190,130 +271,57 @@ export const createRazorpayOrder = action({
       throw new ConvexError("Could not start payment — please try again");
     }
 
-    await ctx.runMutation(internal.payments.attachRazorpayOrder, {
-      orderId,
-      razorpayOrderId,
-    });
-
     // keyId is public — the browser needs it to open the checkout popup.
-    return { razorpayOrderId, amount: order.total, keyId };
+    return { razorpayOrderId, amount, keyId };
   },
 });
 
-// When the payment window closes without reporting success, we must NOT assume
-// the customer abandoned it. Netbanking and UPI redirect away from the popup
-// and can close it even though the money went through. So instead of trusting
-// the browser, we ask Razorpay what actually happened to this order and settle
-// it accordingly. This is the difference between "the browser said nothing" and
-// "no payment was made".
-export const reconcileOrder = action({
-  args: { orderId: v.id("orders") },
+// Step 2: finish checkout. Called on BOTH payment success and popup-close — we
+// never trust the browser's word, we ask Razorpay directly whether this order
+// was actually paid. Only if it was do we create the order. If not, nothing is
+// recorded and the cart is left untouched.
+export const finalizeOrder = action({
+  args: {
+    razorpayOrderId: v.string(),
+    name: v.string(),
+    phone: v.string(),
+    address: v.string(),
+  },
   handler: async (
     ctx,
-    { orderId }
-  ): Promise<{ status: "paid" | "cancelled" }> => {
+    args
+  ): Promise<{ paid: boolean; orderId: Id<"orders"> | null }> => {
     const userId = await getAuthUserId(ctx);
     if (userId === null) throw new ConvexError("Please sign in");
 
-    const order = await ctx.runQuery(internal.payments.loadOwnOrder, {
-      orderId,
-      userId: userId as Id<"users">,
+    // Already finalized (idempotent) — hand back the existing order.
+    const existing = await ctx.runQuery(internal.payments.orderByRazorpay, {
+      razorpayOrderId: args.razorpayOrderId,
     });
-    if (!order) throw new ConvexError("Order not found");
-    if (order.status === "paid") return { status: "paid" };
-
-    // Never reached Razorpay at all — nothing could have been charged.
-    if (!order.razorpayOrderId) {
-      await ctx.runMutation(internal.payments.cancelIfPending, { orderId });
-      return { status: "cancelled" };
+    if (existing && existing.userId === userId) {
+      return { paid: true, orderId: existing._id };
     }
 
     const { keyId, keySecret } = credentials();
-    const response = await fetch(
-      `${RAZORPAY_API}/${order.razorpayOrderId}/payments`,
-      { headers: { Authorization: `Basic ${btoa(`${keyId}:${keySecret}`)}` } }
-    );
+    const payment = await fetchPaidPayment(keyId, keySecret, args.razorpayOrderId);
 
-    if (!response.ok) {
-      // Can't confirm either way — leave it pending rather than wrongly
-      // cancelling an order that may well have been paid.
-      console.error("Razorpay reconcile failed", await response.text());
-      throw new ConvexError(
-        "We couldn't confirm your payment status — please check your orders in a moment"
-      );
+    // No captured payment → the customer didn't pay. Record nothing.
+    if (!payment) return { paid: false, orderId: null };
+
+    // The payment order must be the one we created for THIS user.
+    if (payment.notesUserId !== userId) {
+      throw new ConvexError("Payment verification failed");
     }
 
-    const data: unknown = await response.json();
-    const items =
-      typeof data === "object" && data !== null && "items" in data
-        ? (data as { items: unknown }).items
-        : undefined;
-
-    const paid = Array.isArray(items)
-      ? items.find(
-          (p): p is { id: string; status: string } =>
-            typeof p === "object" &&
-            p !== null &&
-            typeof (p as { id?: unknown }).id === "string" &&
-            ((p as { status?: unknown }).status === "captured" ||
-              (p as { status?: unknown }).status === "authorized")
-        )
-      : undefined;
-
-    if (paid) {
-      await ctx.runMutation(internal.payments.markPaid, {
-        orderId,
-        razorpayPaymentId: paid.id,
-      });
-      return { status: "paid" };
-    }
-
-    await ctx.runMutation(internal.payments.cancelIfPending, { orderId });
-    return { status: "cancelled" };
-  },
-});
-
-// Step 2 of payment: the browser reports success, but we NEVER take its word
-// for it. Razorpay signs `orderId|paymentId` with our secret; recomputing that
-// signature is the only proof the payment is real.
-export const verifyPayment = action({
-  args: {
-    orderId: v.id("orders"),
-    razorpayOrderId: v.string(),
-    razorpayPaymentId: v.string(),
-    razorpaySignature: v.string(),
-  },
-  handler: async (ctx, args): Promise<{ status: "paid" }> => {
-    const userId = await getAuthUserId(ctx);
-    if (userId === null) throw new ConvexError("Please sign in");
-
-    const order = await ctx.runQuery(internal.payments.loadOwnOrder, {
-      orderId: args.orderId,
+    const contact = validateContact(args);
+    const orderId = await ctx.runMutation(internal.payments.createPaidOrder, {
       userId: userId as Id<"users">,
-    });
-    if (!order) throw new ConvexError("Order not found");
-    if (order.status === "paid") return { status: "paid" };
-
-    // The signed order id must be the one we actually created for this order.
-    if (order.razorpayOrderId !== args.razorpayOrderId) {
-      throw new ConvexError("Payment verification failed");
-    }
-
-    const { keySecret } = credentials();
-    const expected = await hmacSha256Hex(
-      keySecret,
-      `${args.razorpayOrderId}|${args.razorpayPaymentId}`
-    );
-
-    if (!safeEqual(expected, args.razorpaySignature)) {
-      throw new ConvexError("Payment verification failed");
-    }
-
-    await ctx.runMutation(internal.payments.markPaid, {
-      orderId: args.orderId,
-      razorpayPaymentId: args.razorpayPaymentId,
+      razorpayOrderId: args.razorpayOrderId,
+      razorpayPaymentId: payment.paymentId,
+      paidAmount: payment.amount,
+      contact,
     });
 
-    return { status: "paid" };
+    return { paid: true, orderId };
   },
 });
