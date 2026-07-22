@@ -8,7 +8,6 @@ import {
   AuthLoading,
   Unauthenticated,
   useAction,
-  useMutation,
   useQuery,
 } from "convex/react";
 import { ConvexError } from "convex/values";
@@ -31,10 +30,8 @@ function CheckoutForm() {
   const router = useRouter();
   const me = useQuery(api.users.me);
   const items = useQuery(api.items.list);
-  const placeOrder = useMutation(api.orders.place);
   const createRazorpayOrder = useAction(api.payments.createRazorpayOrder);
-  const verifyPayment = useAction(api.payments.verifyPayment);
-  const reconcileOrder = useAction(api.payments.reconcileOrder);
+  const finalizeOrder = useAction(api.payments.finalizeOrder);
   const { lines, hydrated } = useCart();
 
   // Delivery details — required. Pre-filled from the saved profile so a
@@ -88,23 +85,15 @@ function CheckoutForm() {
     setError(null);
     setPlacing(true);
 
-    let orderId;
+    const contact = { name, phone, address };
     try {
-      // 1. Create our order (reserves stock, empties the cart, saves details).
-      orderId = await placeOrder({ name, phone, address });
-    } catch (err) {
-      setError(errorMessage(err, "Could not place your order"));
-      setPlacing(false);
-      return;
-    }
+      // 1. Start checkout: validate cart + contact and get a Razorpay order.
+      //    Nothing is written to our database here — no order exists yet.
+      const { razorpayOrderId, amount, keyId } = await createRazorpayOrder(
+        contact
+      );
 
-    try {
-      // 2. Ask Razorpay (server-side, using the secret) for a payment order.
-      const { razorpayOrderId, amount, keyId } = await createRazorpayOrder({
-        orderId,
-      });
-
-      // 3. Let the customer pay in Razorpay's popup.
+      // 2. Let the customer pay in Razorpay's popup.
       const result = await openRazorpayCheckout({
         keyId,
         amount,
@@ -114,44 +103,24 @@ function CheckoutForm() {
         customerEmail: me?.email ?? undefined,
       });
 
-      // The popup closed without reporting success — but that does NOT mean no
-      // payment happened. Netbanking and UPI redirect away and can close the
-      // window even on success, so we ask Razorpay what really occurred rather
-      // than assuming the worst and cancelling a paid order.
-      if (result.outcome !== "paid") {
-        const settled = await reconcileOrder({ orderId });
-        if (settled.status === "paid") {
-          router.push(`/orders/${orderId}`);
-          return;
-        }
-        setError(
-          result.outcome === "dismissed"
-            ? "Payment cancelled — your cart is still here whenever you're ready."
-            : `Payment failed: ${result.message}. Your cart is unchanged.`
-        );
-        setPlacing(false);
+      // 3. Finalize — on success OR popup-close alike. The server asks Razorpay
+      //    whether the payment truly captured and ONLY THEN creates the order
+      //    (deducting stock, clearing the cart). If it wasn't paid, nothing was
+      //    recorded and the cart is exactly as it was.
+      const settled = await finalizeOrder({ razorpayOrderId, ...contact });
+
+      if (settled.paid && settled.orderId) {
+        router.push(`/orders/${settled.orderId}`);
         return;
       }
 
-      // 4. Prove the payment is genuine before trusting it. The browser's
-      //    "success" alone is never enough — the server checks the signature,
-      //    and only then are the cart and stock updated.
-      await verifyPayment({
-        orderId,
-        razorpayOrderId: result.response.razorpay_order_id,
-        razorpayPaymentId: result.response.razorpay_payment_id,
-        razorpaySignature: result.response.razorpay_signature,
-      });
-
-      router.push(`/orders/${orderId}`);
+      setError(
+        result.outcome === "failed"
+          ? `Payment failed: ${result.message}. Your cart is unchanged.`
+          : "Payment not completed — your cart is still here whenever you're ready."
+      );
+      setPlacing(false);
     } catch (err) {
-      // Something went wrong mid-flow. Check with Razorpay before concluding
-      // anything — the payment may still have succeeded.
-      const settled = await reconcileOrder({ orderId }).catch(() => null);
-      if (settled?.status === "paid") {
-        router.push(`/orders/${orderId}`);
-        return;
-      }
       setError(errorMessage(err, "Payment could not be completed"));
       setPlacing(false);
     }
