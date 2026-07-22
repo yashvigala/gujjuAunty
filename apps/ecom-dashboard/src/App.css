@@ -150,10 +150,97 @@
   border-bottom: 1px solid var(--border);
 }
 
+.topbar-left {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+}
+
 .topbar-right {
   display: flex;
   gap: 12px;
   align-items: center;
+}
+
+/* Items / Orders tab switcher */
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  font: inherit;
+  font-size: 15px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: none;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text-h);
+}
+
+.tab.active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+/* Orders list */
+.orders-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.order-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.order-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.order-date {
+  margin-left: 10px;
+}
+
+.order-body {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 720px) {
+  .order-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+.order-col p {
+  margin: 2px 0;
+}
+
+.order-items {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
 }
 
 .content {
@@ -320,6 +407,16 @@
 
 .badge.off {
   color: var(--text);
+}
+
+.badge.warn {
+  color: #d97706;
+  border-color: color-mix(in srgb, #d97706 40%, var(--border));
+}
+
+.badge.info {
+  color: #2563eb;
+  border-color: color-mix(in srgb, #2563eb 40%, var(--border));
 }
 
 .row-actions {
